@@ -2,12 +2,23 @@ from flask import Flask, request, jsonify
 import requests
 from geopy.distance import geodesic
 import os
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 app = Flask(__name__)
 
 # --- HARDCODED API KEYS FOR HACKATHON DEMO ---
 # WARNING: Do not use this method in a production application.
 GOOGLE_MAPS_API_KEY = "AIzaSyBLRYiLOgANIIXdHb70lspfXN4p2skEIHI"
+
+# --- Firebase Admin SDK Initialization ---
+firebase_cred_json = os.environ.get('FIREBASE_SERVICE_ACCOUNT_KEY_JSON')
+if firebase_cred_json:
+    cred = credentials.Certificate(eval(firebase_cred_json))
+    firebase_admin.initialize_app(cred)
+    db = firestore.client()
+else:
+    db = None
 
 # --- Helper function for AI risk scoring ---
 def calculate_risk_score(route):
@@ -130,6 +141,78 @@ def autocomplete():
         return jsonify(descriptions)
     except Exception as e:
         return jsonify({"error": f"Autocomplete failed: {str(e)}"}), 500
+
+# --- Medical ID QR Code Endpoint ---
+@app.route('/api/medical_id', methods=['GET'])
+def medical_id():
+    uid = request.args.get('uid')
+    if not uid:
+        return "Missing uid parameter", 400
+    if not db:
+        return "Firestore not initialized", 500
+    try:
+        user_ref = db.collection('users').document(uid)
+        user_doc = user_ref.get()
+        if not user_doc.exists:
+            return "User not found", 404
+        
+        user_data = user_doc.to_dict()
+        # Access the nested 'medicalId' map
+        medical_id_data = user_data.get('medicalId') # Use the field name from Android app
+
+        if not medical_id_data:
+            return "Medical ID data not found for this user", 404
+
+        # Extract fields from the medical_id_data map
+        # Align with field names from Android's MedicalIdData model
+        full_name = medical_id_data.get('fullName', 'Not Provided')
+        blood_group = medical_id_data.get('bloodGroup', 'Not Provided')
+        allergies = medical_id_data.get('allergies', 'None')
+        current_medications = medical_id_data.get('currentMedications', 'None') # Added this field
+        medical_conditions = medical_id_data.get('medicalConditions', 'None')
+        emergency_contact_name = medical_id_data.get('emergencyContactName', 'Not Provided')
+        emergency_contact_phone = medical_id_data.get('emergencyContactPhone', '') # Get phone number
+
+        # Construct a display string for emergency contact
+        emergency_contact_display = f"{emergency_contact_name} ({emergency_contact_phone})" if emergency_contact_name != 'Not Provided' and emergency_contact_phone else emergency_contact_name
+
+        html = f"""
+        <html>
+        <head>
+            <title>Helios Emergency Medical ID</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; background-color: #f4f7f6; color: #333; margin: 0; padding: 20px; display: flex; justify-content: center; align-items: center; min-height: 100vh; }}
+                .container {{ background: #fff; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); padding: 30px; width: 100%; max-width: 450px; text-align: left; }}
+                h2 {{ color: #e74c3c; margin-bottom: 25px; text-align: center; border-bottom: 2px solid #e74c3c; padding-bottom: 10px;}}
+                .field-group {{ margin-bottom: 18px; }}
+                .label {{ font-weight: bold; color: #555; display: block; margin-bottom: 5px; }}
+                .value {{ color: #2c3e50; background-color: #ecf0f1; padding: 8px 12px; border-radius: 5px; word-wrap: break-word; }}
+                /* Simple responsive adjustment */
+                @media (max-width: 480px) {{
+                    .container {{ margin: 20px; padding: 20px; }}
+                    h2 {{ font-size: 1.5em; }}
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h2>Emergency Medical ID</h2>
+                <div class="field-group"><span class="label">Full Name:</span> <span class="value">{full_name}</span></div>
+                <div class="field-group"><span class="label">Blood Group:</span> <span class="value">{blood_group}</span></div>
+                <div class="field-group"><span class="label">Allergies:</span> <span class="value">{allergies}</span></div>
+                <div class="field-group"><span class="label">Current Medications:</span> <span class="value">{current_medications}</span></div>
+                <div class="field-group"><span class="label">Medical Conditions:</span> <span class="value">{medical_conditions}</span></div>
+                <div class="field-group"><span class="label">Emergency Contact:</span> <span class="value">{emergency_contact_display}</span></div>
+            </div>
+        </body>
+        </html>
+        """
+        return html, 200
+    except Exception as e:
+        # It's good practice to log the exception here
+        # import traceback
+        # app.logger.error(f"Error fetching medical ID for UID {uid}: {str(e)}\n{traceback.format_exc()}")
+        return f"Error fetching medical ID: {str(e)}", 500
 
 @app.route('/api/route', methods=['GET'])
 def get_route():
