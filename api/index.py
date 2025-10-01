@@ -4,6 +4,10 @@ from geopy.distance import geodesic
 import os
 import firebase_admin
 from firebase_admin import credentials, firestore
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = Flask(__name__)
 
@@ -12,12 +16,22 @@ app = Flask(__name__)
 GOOGLE_MAPS_API_KEY = "AIzaSyBLRYiLOgANIIXdHb70lspfXN4p2skEIHI"
 
 # --- Firebase Admin SDK Initialization ---
-firebase_cred_json = os.environ.get('FIREBASE_SERVICE_ACCOUNT_KEY_JSON')
-if firebase_cred_json:
-    cred = credentials.Certificate(eval(firebase_cred_json))
-    firebase_admin.initialize_app(cred)
-    db = firestore.client()
-else:
+import json
+
+try:
+    firebase_cred_json = os.environ.get('FIREBASE_SERVICE_ACCOUNT_KEY_JSON')
+    if firebase_cred_json:
+        # Parse the JSON string from environment variable
+        cred_dict = json.loads(firebase_cred_json)
+        cred = credentials.Certificate(cred_dict)
+        firebase_admin.initialize_app(cred)
+        db = firestore.client()
+        print("Firebase initialized successfully")
+    else:
+        print("FIREBASE_SERVICE_ACCOUNT_KEY_JSON environment variable not found")
+        db = None
+except Exception as e:
+    print(f"Firebase initialization failed: {str(e)}")
     db = None
 
 # --- Helper function for AI risk scoring ---

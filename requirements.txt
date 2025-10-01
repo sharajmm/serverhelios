@@ -2,3 +2,4 @@ Flask
 requests
 geopy
 firebase-admin
+python-dotenv
