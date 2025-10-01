@@ -11,30 +11,59 @@ GOOGLE_MAPS_API_KEY = "AIzaSyBLRYiLOgANIIXdHb70lspfXN4p2skEIHI"
 
 # --- Helper function for AI risk scoring ---
 def calculate_risk_score(route):
-    base_score = 0
+    base_score = 100  # Start with base score of 100
     reasons = []
     hazard_coordinates = []
 
-    # Factor 1: Traffic Duration
+    # Factor 1: Traffic Duration (More granular scoring)
     duration_in_traffic = route.get("legs", [{}])[0].get("duration_in_traffic", {}).get("value", 0)
+    normal_duration = route.get("legs", [{}])[0].get("duration", {}).get("value", 0)
     minutes_in_traffic = duration_in_traffic // 60
-    if minutes_in_traffic > 5:
-        base_score += minutes_in_traffic * 10
-        reasons.append(f"High traffic: Approx. {minutes_in_traffic} mins")
+    normal_minutes = normal_duration // 60
+    
+    # Calculate traffic delay factor
+    if duration_in_traffic > normal_duration:
+        delay_factor = (duration_in_traffic - normal_duration) / normal_duration
+        traffic_score = min(delay_factor * 200, 300)  # Cap at 300 points
+        base_score += traffic_score
+        if minutes_in_traffic > normal_minutes + 5:
+            reasons.append(f"Heavy traffic: {minutes_in_traffic} mins (normally {normal_minutes} mins)")
+        elif minutes_in_traffic > normal_minutes + 2:
+            reasons.append(f"Moderate traffic: {minutes_in_traffic} mins (normally {normal_minutes} mins)")
 
-    # Factor 2: Hazardous Maneuvers
-    hazard_keywords = ["sharp", "roundabout", "merge", "u-turn"]
+    # Factor 2: Route Distance (Longer routes = slightly higher base risk)
+    distance = route.get("legs", [{}])[0].get("distance", {}).get("value", 0)  # in meters
+    distance_km = distance / 1000
+    distance_score = min(distance_km * 5, 100)  # 5 points per km, max 100
+    base_score += distance_score
+
+    # Factor 3: Hazardous Maneuvers (More nuanced scoring)
+    hazard_keywords = {
+        "roundabout": 25, "sharp": 35, "u-turn": 45, "merge": 20,
+        "exit": 15, "turn left": 8, "turn right": 8, "slight": 5
+    }
     maneuver_count = 0
+    total_steps = len(route.get("legs", [{}])[0].get("steps", []))
+    
     for step in route.get("legs", [{}])[0].get("steps", []):
         instruction = step.get("html_instructions", "").lower()
-        if any(keyword in instruction for keyword in hazard_keywords):
-            maneuver_count += 1
-            base_score += 100
-            hazard_coordinates.append(step.get("start_location"))
-    if maneuver_count > 2:
-        reasons.append(f"Includes {maneuver_count} complex turns or merges")
+        for keyword, score in hazard_keywords.items():
+            if keyword in instruction:
+                maneuver_count += 1
+                base_score += score
+                if score > 20:  # Only add coordinates for major hazards
+                    hazard_coordinates.append(step.get("start_location"))
+                break
+    
+    # Complexity factor based on turns per km
+    if distance_km > 0:
+        turns_per_km = maneuver_count / distance_km
+        if turns_per_km > 10:
+            reasons.append(f"Very complex route: {maneuver_count} turns in {distance_km:.1f}km")
+        elif turns_per_km > 5:
+            reasons.append(f"Complex route: {maneuver_count} turns in {distance_km:.1f}km")
 
-    # Factor 3: Accident Blackspots (Coimbatore Data)
+    # Factor 4: Accident Blackspots (Coimbatore Data)
     ACCIDENT_BLACKSPOTS = [
         {"lat": 11.0180, "lon": 76.9691, "name": "Gandhipuram Signal"},
         {"lat": 10.9946, "lon": 76.9644, "name": "Ukkadam"},
@@ -44,16 +73,26 @@ def calculate_risk_score(route):
     passed_blackspots = set()
     for step in route.get("legs", [{}])[0].get("steps", []):
         step_loc = step.get("start_location")
-        for spot in ACCIDENT_BLACKSPOTS:
-            if spot["name"] not in passed_blackspots and geodesic((step_loc['lat'], step_loc['lng']), (spot['lat'], spot['lon'])).meters <= 250:
-                base_score += 500
-                blackspot_count += 1
-                passed_blackspots.add(spot["name"])
+        if step_loc:
+            for spot in ACCIDENT_BLACKSPOTS:
+                if spot["name"] not in passed_blackspots and geodesic((step_loc['lat'], step_loc['lng']), (spot['lat'], spot['lon'])).meters <= 250:
+                    base_score += 400
+                    blackspot_count += 1
+                    passed_blackspots.add(spot["name"])
     if blackspot_count > 0:
         reasons.append(f"Passes through {blackspot_count} known high-accident zone(s)")
     
+    # Factor 5: Highway vs City Roads
+    if any("highway" in step.get("html_instructions", "").lower() 
+           for step in route.get("legs", [{}])[0].get("steps", [])):
+        base_score += 50
+        reasons.append("Includes highway sections")
+    
     if not reasons:
-        reasons.append("This is a standard route. Always ride with caution.")
+        if base_score < 150:
+            reasons.append("Low-risk route with minimal complexity")
+        else:
+            reasons.append("Standard route with moderate complexity")
 
     return base_score, hazard_coordinates, reasons
 
@@ -115,15 +154,40 @@ def get_route():
         if not route_objects:
              return jsonify({"error": "Could not process any routes"}), 500
 
-        min_risk = min(r['raw_risk'] for r in route_objects)
-        max_risk = max(r['raw_risk'] for r in route_objects)
-        
-        for route in route_objects:
-            if max_risk > min_risk:
-                normalized_score = 1 + 9 * (route['raw_risk'] - min_risk) / (max_risk - min_risk)
-                route['risk_score'] = round(normalized_score, 1)
+        # More dynamic risk scoring approach
+        if len(route_objects) == 1:
+            # Single route: Score based on absolute risk levels
+            raw_score = route_objects[0]['raw_risk']
+            if raw_score < 150:
+                route_objects[0]['risk_score'] = round(1.0 + (raw_score - 100) / 50 * 2, 1)  # 1.0-3.0
+            elif raw_score < 300:
+                route_objects[0]['risk_score'] = round(3.0 + (raw_score - 150) / 150 * 4, 1)  # 3.0-7.0
             else:
-                route['risk_score'] = 1.0
+                route_objects[0]['risk_score'] = round(7.0 + min((raw_score - 300) / 200 * 3, 3), 1)  # 7.0-10.0
+        else:
+            # Multiple routes: Relative scoring with more granularity
+            min_risk = min(r['raw_risk'] for r in route_objects)
+            max_risk = max(r['raw_risk'] for r in route_objects)
+            
+            for route in route_objects:
+                if max_risk > min_risk:
+                    # Use a more nuanced curve that doesn't always hit extremes
+                    relative_position = (route['raw_risk'] - min_risk) / (max_risk - min_risk)
+                    # Apply a curve that creates more middle values
+                    curved_position = 0.5 + 0.5 * (2 * relative_position - 1) ** 3
+                    route['risk_score'] = round(2.0 + curved_position * 6.0, 1)  # Range: 2.0-8.0
+                else:
+                    # All routes have same risk
+                    avg_score = sum(r['raw_risk'] for r in route_objects) / len(route_objects)
+                    if avg_score < 200:
+                        route['risk_score'] = 3.0
+                    elif avg_score < 400:
+                        route['risk_score'] = 5.0
+                    else:
+                        route['risk_score'] = 7.0
+        
+        # Clean up raw scores
+        for route in route_objects:
             del route['raw_risk']
 
         return jsonify({"routes": route_objects})
