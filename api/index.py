@@ -22,7 +22,7 @@ def calculate_risk_score(route):
     normal_minutes = normal_duration // 60
     
     # Calculate traffic delay factor
-    if duration_in_traffic > normal_duration:
+    if duration_in_traffic > normal_duration and normal_duration > 0:
         delay_factor = (duration_in_traffic - normal_duration) / normal_duration
         traffic_score = min(delay_factor * 200, 300)  # Cap at 300 points
         base_score += traffic_score
@@ -30,6 +30,8 @@ def calculate_risk_score(route):
             reasons.append(f"Heavy traffic: {minutes_in_traffic} mins (normally {normal_minutes} mins)")
         elif minutes_in_traffic > normal_minutes + 2:
             reasons.append(f"Moderate traffic: {minutes_in_traffic} mins (normally {normal_minutes} mins)")
+    elif minutes_in_traffic > 15:  # Long route regardless of traffic
+        reasons.append(f"Long route: {minutes_in_traffic} minutes travel time")
 
     # Factor 2: Route Distance (Longer routes = slightly higher base risk)
     distance = route.get("legs", [{}])[0].get("distance", {}).get("value", 0)  # in meters
@@ -62,6 +64,8 @@ def calculate_risk_score(route):
             reasons.append(f"Very complex route: {maneuver_count} turns in {distance_km:.1f}km")
         elif turns_per_km > 5:
             reasons.append(f"Complex route: {maneuver_count} turns in {distance_km:.1f}km")
+        elif maneuver_count > 15:
+            reasons.append(f"Multiple turns required: {maneuver_count} maneuvers")
 
     # Factor 4: Accident Blackspots (Coimbatore Data)
     ACCIDENT_BLACKSPOTS = [
@@ -83,16 +87,29 @@ def calculate_risk_score(route):
         reasons.append(f"Passes through {blackspot_count} known high-accident zone(s)")
     
     # Factor 5: Highway vs City Roads
-    if any("highway" in step.get("html_instructions", "").lower() 
-           for step in route.get("legs", [{}])[0].get("steps", [])):
-        base_score += 50
-        reasons.append("Includes highway sections")
+    highway_found = False
+    for step in route.get("legs", [{}])[0].get("steps", []):
+        instruction = step.get("html_instructions", "").lower()
+        if "highway" in instruction or "expressway" in instruction:
+            if not highway_found:  # Only add once
+                base_score += 50
+                reasons.append("Includes highway sections")
+                highway_found = True
+            break
     
+    # Factor 6: Route Type Analysis
+    route_steps = route.get("legs", [{}])[0].get("steps", [])
+    if len(route_steps) > 20:
+        reasons.append(f"Multi-segment route with {len(route_steps)} navigation steps")
+    
+    # Only add default message if no specific reasons were found
     if not reasons:
         if base_score < 150:
-            reasons.append("Low-risk route with minimal complexity")
+            reasons.append("Direct route with minimal complexity")
+        elif base_score < 250:
+            reasons.append("Standard city route")
         else:
-            reasons.append("Standard route with moderate complexity")
+            reasons.append("Route requires extra caution due to complexity")
 
     return base_score, hazard_coordinates, reasons
 
